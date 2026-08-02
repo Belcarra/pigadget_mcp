@@ -1,0 +1,15 @@
+[Unit]
+Description=pigadget-mcp - MCP service for Raspberry Pi USB gadget systems
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Environment=PIGADGET_MCP_PROFILE_DIRS=/etc/gadgetservice:/usr/local/share/gadgetconfig/definitions:/usr/share/gadgetconfig/definitions
+ExecStart=/usr/local/bin/pigadget-mcp --transport streamable-http --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
