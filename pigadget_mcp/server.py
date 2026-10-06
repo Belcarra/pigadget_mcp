@@ -5,6 +5,7 @@
 
 import argparse
 import ast
+import hashlib
 import glob
 import json
 import os
@@ -20,7 +21,7 @@ from pigadget_mcp.version import VERSION as APP_VERSION
 DEFAULT_TIMEOUT = int(os.environ.get("PIGADGET_MCP_TIMEOUT", "20"))
 GADGETCONFIG_BIN = os.environ.get("PIGADGET_MCP_GADGETCONFIG", "gadgetconfig")
 CAPABILITY_SCHEMA_VERSION = 1
-TOOLSET_VERSION = "0.1"
+TOOLSET_VERSION = "0.2"
 TOOL_NAMES = [
     "gadget.inventory",
     "gadget.status",
@@ -30,8 +31,21 @@ TOOL_NAMES = [
     "gadget.soft_connect",
     "gadget.soft_disconnect",
     "gadget.configure_profile",
+    "gadget.probe_enable",
+    "gadget.probe_disable",
     "gadget.collect_logs",
 ]
+PROBE_NAME = "gadget_probe"
+PROBE_PROFILE_PATH = Path("/etc/gadgetservice/gadget_probe.json")
+PROBE_PID_MAP = {
+    "pi1": "0xa001",
+    "pi2": "0xa002",
+    "pi3": "0xa003",
+    "pi5": "0xa005",
+    "pz1": "0xa011",
+    "pz2": "0xa012",
+    "pz3": "0xa013",
+}
 DEFAULT_PROFILE_DIRS = [
     "/etc/gadgetservice",
     "/usr/local/share/gadgetconfig/definitions",
@@ -301,6 +315,92 @@ def _configure_static_ip(interface, address):
     ]
 
 
+def _normalize_hex16(value, field):
+    text = str(value).strip().lower()
+    if text.startswith("0x"):
+        text = text[2:]
+    if not re.fullmatch(r"[0-9a-f]{4}", text):
+        raise GadgetError("%s must be four hex digits: %s" % (field, value))
+    return "0x%s" % text
+
+
+def _probe_pid_for(pi_name=None, pid=None):
+    if pid is not None:
+        return _normalize_hex16(pid, "pid")
+    name = (pi_name or socket.gethostname()).split(".")[0].lower()
+    mapped = PROBE_PID_MAP.get(name)
+    if not mapped:
+        raise GadgetError("no probe PID mapping for host %s; pass pid explicitly" % name)
+    return mapped
+
+
+def _mac_pair(seed):
+    digest = hashlib.sha256(seed.encode("utf-8")).digest()
+    dev = [0x02, digest[0], digest[1], digest[2], digest[3], digest[4]]
+    host = [0x02, digest[5], digest[6], digest[7], digest[8], digest[9]]
+    return (
+        ":".join("%02x" % item for item in dev),
+        ":".join("%02x" % item for item in host),
+    )
+
+
+def _probe_profile(pi_name, pid, serial, function):
+    function = function.lower()
+    if function not in {"eem", "ecm"}:
+        raise GadgetError("probe function must be eem or ecm")
+    function_name = "eem.usb0" if function == "eem" else "geth.usb0"
+    dev_addr, host_addr = _mac_pair("%s-%s-%s" % (pi_name, pid, serial))
+    return {
+        PROBE_NAME: {
+            "idVendor": "0x15ec",
+            "idProduct": pid,
+            "bcdDevice": "0x0001",
+            "bDeviceClass": "0x00",
+            "bDeviceSubClass": "0x00",
+            "bDeviceProtocol": "0x00",
+            "bcdUSB": "0x0200",
+            "bMaxPacketSize0": "0x40",
+            "strings": {
+                "0x409": {
+                    "serialnumber": serial,
+                    "product": "Belcarra USBLAN Probe %s" % pi_name,
+                    "manufacturer": "Belcarra",
+                }
+            },
+            "functions": {
+                function_name: {
+                    "qmult": "5",
+                    "host_addr": host_addr,
+                    "dev_addr": dev_addr,
+                }
+            },
+            "configs": {
+                "Belcarra Probe.1": {
+                    "bmAttributes": "0x80",
+                    "MaxPower": "2",
+                    "strings": {
+                        "0x409": {
+                            "configuration": "Belcarra USBLAN Probe %s" % function.upper(),
+                        }
+                    },
+                    "functions": [
+                        {
+                            "name": function_name,
+                            "function": function_name,
+                        }
+                    ],
+                }
+            },
+        }
+    }
+
+
+def _write_probe_profile(profile):
+    PROBE_PROFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    PROBE_PROFILE_PATH.write_text(json.dumps(profile, indent=4, sort_keys=True) + "\n", encoding="utf-8")
+    return str(PROBE_PROFILE_PATH)
+
+
 def gadget_inventory():
     """Return host, gadgetconfig, UDC, profile, and usb interface inventory."""
     query = _query()
@@ -419,6 +519,54 @@ def gadget_configure_profile(profile, name=None, static_ip=None, overrides=None)
     }
 
 
+def gadget_probe_enable(pi_name=None, pid=None, serial=None, function="eem", static_ip=None):
+    """Configure and enable the temporary lab survey gadget."""
+    pi = (pi_name or socket.gethostname()).split(".")[0].lower()
+    probe_pid = _probe_pid_for(pi, pid)
+    probe_serial = serial or ("%s-probe" % pi)
+    profile = _probe_profile(pi, probe_pid, probe_serial, function)
+    profile_path = _write_probe_profile(profile)
+    disable = _gadgetconfig(["--disable"])
+    remove = _gadgetconfig(["--remove", PROBE_NAME])
+    add = _gadgetconfig(["--add", profile_path])
+    enable = _gadgetconfig(["--enable", PROBE_NAME])
+    status = gadget_status(False)
+    ip_results = []
+    if static_ip:
+        iface = status["selected_usb_interface"]
+        if not iface:
+            raise GadgetError("cannot configure static IP; no usbN interface found")
+        ip_results = _configure_static_ip(iface, static_ip)
+        status = gadget_status(False)
+    return {
+        "pi_name": pi,
+        "vid": "0x15ec",
+        "pid": probe_pid,
+        "serialnumber": probe_serial,
+        "function": function.lower(),
+        "profile_path": profile_path,
+        "disable": disable,
+        "remove": remove,
+        "add": add,
+        "enable": enable,
+        "static_ip": ip_results,
+        "status": status,
+    }
+
+
+def gadget_probe_disable(remove=True):
+    """Disable and optionally remove the temporary lab survey gadget."""
+    disable = _gadgetconfig(["--disable"])
+    remove_result = _gadgetconfig(["--remove", PROBE_NAME]) if remove else None
+    return {
+        "name": PROBE_NAME,
+        "profile_path": str(PROBE_PROFILE_PATH),
+        "disable": disable,
+        "remove": remove_result,
+        "status": gadget_status(False),
+    }
+
+
 def gadget_collect_logs(lines=120):
     """Collect lightweight diagnostic evidence for a gadget test run."""
     return {
@@ -451,6 +599,8 @@ def _build_mcp(host, port, log_level):
     mcp.tool(name="gadget.soft_connect")(gadget_soft_connect)
     mcp.tool(name="gadget.soft_disconnect")(gadget_soft_disconnect)
     mcp.tool(name="gadget.configure_profile")(gadget_configure_profile)
+    mcp.tool(name="gadget.probe_enable")(gadget_probe_enable)
+    mcp.tool(name="gadget.probe_disable")(gadget_probe_disable)
     mcp.tool(name="gadget.collect_logs")(gadget_collect_logs)
     return mcp
 
