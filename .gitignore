@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+build/
+dist/
+*.egg-info/
+
+# Private lab provisioning and deployment records are not release inputs.
+/deployments/
+/deploy/bootstrap_lab.sh
+/deploy/sudoers-lab

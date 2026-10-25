@@ -71,11 +71,10 @@ Disable/unload releases managed DHCP first and removes only its owned address.
 The lease client stays running for renewal during long tests. Sessions live
 under `/run/pigadget-mcp/dhcp`; separate runs cannot replace an active session.
 
-`deploy/sudoers-lab` deliberately grants `sl` and `codex` unrestricted passwordless
-sudo to match the existing private lab policy. It is not an end-user deployment
-policy. `deploy/bootstrap_lab.sh` validates it with visudo and installs
-`isc-dhcp-client` if missing. MCP DHCP operations themselves run through the
-root systemd service and do not require agent-side sudo.
+Install `isc-dhcp-client` separately if the Pi needs managed DHCP. MCP DHCP
+operations run through the root systemd service and do not require agent-side
+sudo or a passwordless-sudo policy. Private lab provisioning and deployment
+records are not part of the distributed project.
 
 Run unit tests with `python3 -m unittest discover -s tests` in an environment
 with the package dependencies installed. The explicit root-only
@@ -247,9 +246,8 @@ PYTHONPATH=. PIGADGET_MCP_GADGETCONFIG=/usr/local/bin/gadgetconfig \
   Restrict access with a firewall, private network/VPN, or authenticated proxy;
   do not expose it directly to the internet. Broker authentication alone does
   not protect direct access to the Pi endpoint.
-- `deploy/bootstrap_lab.sh` and `deploy/sudoers-lab` are optional private-lab
-  helpers, not prerequisites for MCP operation. Do not apply their unrestricted
-  passwordless-sudo policy to a general-purpose installation.
+- Private lab provisioning is not a prerequisite for MCP operation. Do not grant
+  unrestricted passwordless sudo to interactive users merely to use this service.
 
 ## Lab Survey Probe
 
